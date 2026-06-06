@@ -134,6 +134,6 @@ fn uploaded_set() -> Result<HashSet<String>> {
 fn sessions_dir() -> PathBuf {
     data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("ChampSelect")
+        .join("DraftWatch")
         .join("sessions")
 }
