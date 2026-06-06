@@ -24,13 +24,13 @@ enum AppMsg {
 fn main() {
     let log_dir = dirs::data_local_dir()
         .expect("no local data dir")
-        .join("ChampSelect");
+        .join("DraftWatch");
     std::fs::create_dir_all(&log_dir).expect("create log dir");
 
     let file_appender = tracing_appender::rolling::never(&log_dir, "app.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter = tracing_subscriber::EnvFilter::new("champ_select=info");
+    let filter = tracing_subscriber::EnvFilter::new("draft_watch=info");
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

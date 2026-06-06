@@ -42,7 +42,7 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let text = format!(
-            "# ChampSelect config\n\
+            "# DraftWatch config\n\
              # upload_url = \"https://your-site.com/api/sessions\"\n\
              # upload_api_key = \"your-key\"\n\
              # league_path = \"C:\\\\Riot Games\\\\League of Legends\"\n"
@@ -55,6 +55,6 @@ impl Config {
 pub fn config_path() -> PathBuf {
     config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("ChampSelect")
+        .join("DraftWatch")
         .join("config.toml")
 }

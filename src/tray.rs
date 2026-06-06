@@ -7,14 +7,14 @@ use tray_icon::{
 fn data_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
         .expect("no local data dir")
-        .join("ChampSelect")
+        .join("DraftWatch")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayState {
     WaitingForClient,
     ClientConnected,
-    InChampSelect,
+    InDraftWatch,
 }
 
 pub struct Tray {
@@ -27,7 +27,7 @@ pub struct Tray {
 
 impl Tray {
     pub fn new() -> Result<Self> {
-        let status_item = MenuItem::new("ChampSelect Monitor", false, None);
+        let status_item = MenuItem::new("DraftWatch Monitor", false, None);
         let count_item = MenuItem::new("0 matches recorded", false, None);
         let open_folder_item = MenuItem::new("Open Folder", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
@@ -44,7 +44,7 @@ impl Tray {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("ChampSelect — waiting for League Client")
+            .with_tooltip("DraftWatch — waiting for League Client")
             .with_icon(icon)
             .build()?;
 
@@ -73,9 +73,9 @@ impl Tray {
         self.state = state;
 
         let tooltip = match state {
-            TrayState::WaitingForClient => "ChampSelect — waiting for League Client",
-            TrayState::ClientConnected => "ChampSelect — client connected",
-            TrayState::InChampSelect => "ChampSelect — in champion select!",
+            TrayState::WaitingForClient => "DraftWatch — waiting for League Client",
+            TrayState::ClientConnected => "DraftWatch — client connected",
+            TrayState::InDraftWatch => "DraftWatch — in champion select!",
         };
 
         let _ = self.icon.set_icon(Some(make_icon(state)));
@@ -102,7 +102,7 @@ fn make_icon(state: TrayState) -> Icon {
     let color: [u8; 4] = match state {
         TrayState::WaitingForClient => [120, 120, 120, 255],
         TrayState::ClientConnected => [40, 180, 80, 255],
-        TrayState::InChampSelect => [30, 120, 255, 255],
+        TrayState::InDraftWatch => [30, 120, 255, 255],
     };
     let pixels: Vec<u8> = (0..16 * 16).flat_map(|_| color).collect();
     Icon::from_rgba(pixels, 16, 16).expect("valid icon")
