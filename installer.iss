@@ -20,7 +20,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "startup"; Description: "Start {#MyAppName} when Windows starts"; GroupDescription: "Additional tasks:"; Flags: unchecked
+Name: "startup"; Description: "Start {#MyAppName} when Windows starts"; GroupDescription: "Additional tasks:"
 
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
