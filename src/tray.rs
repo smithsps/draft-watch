@@ -14,7 +14,7 @@ fn data_dir() -> std::path::PathBuf {
 pub enum TrayState {
     WaitingForClient,
     ClientConnected,
-    InDraftWatch,
+    InDraft,
 }
 
 pub struct Tray {
@@ -75,7 +75,7 @@ impl Tray {
         let tooltip = match state {
             TrayState::WaitingForClient => "DraftWatch — waiting for League Client",
             TrayState::ClientConnected => "DraftWatch — client connected",
-            TrayState::InDraftWatch => "DraftWatch — in champion select!",
+            TrayState::InDraft => "DraftWatch — in champion select!",
         };
 
         let _ = self.icon.set_icon(Some(make_icon(state)));
@@ -102,7 +102,7 @@ fn make_icon(state: TrayState) -> Icon {
     let color: [u8; 4] = match state {
         TrayState::WaitingForClient => [120, 120, 120, 255],
         TrayState::ClientConnected => [40, 180, 80, 255],
-        TrayState::InDraftWatch => [30, 120, 255, 255],
+        TrayState::InDraft => [30, 120, 255, 255],
     };
     let pixels: Vec<u8> = (0..16 * 16).flat_map(|_| color).collect();
     Icon::from_rgba(pixels, 16, 16).expect("valid icon")

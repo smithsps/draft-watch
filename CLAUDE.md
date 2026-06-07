@@ -30,7 +30,7 @@ Communication from background → main is via `std::sync::mpsc`. The background 
 2. On find: connects `wss://127.0.0.1:{port}/` with Basic auth (`riot:{token}`) and self-signed cert accepted.
 3. Subscribes to `OnJsonApiEvent_lol-champ-select_v1_session` (LCU WAMP opcode 5).
 4. Incoming events (opcode 8): `Update`/`Create` → store latest snapshot; `Delete` or `timer.phase == "GAME_STARTING"` → commit session.
-5. Commit: serialize raw `serde_json::Value` → SQLite (`%LOCALAPPDATA%\ChampSelect\sessions.db`) → POST to `upload_url` if configured.
+5. Commit: serialize raw `serde_json::Value` → SQLite (`%LOCALAPPDATA%\DraftWatch\sessions.db`) → POST to `upload_url` if configured.
 
 ### Key design decisions
 
@@ -40,7 +40,7 @@ Communication from background → main is via `std::sync::mpsc`. The background 
 
 ### Config
 
-Auto-created at `%APPDATA%\ChampSelect\config.toml` on first run:
+Auto-created at `%APPDATA%\DraftWatch\config.toml` on first run:
 
 ```toml
 # upload_url = "https://your-site.com/api/sessions"
