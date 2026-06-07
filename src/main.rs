@@ -46,6 +46,7 @@ fn main() {
     std::thread::spawn({
         let config = config.clone();
         move || {
+            let lcu_config = config.clone();
             let uploader = uploader::Uploader::new(config).expect("create uploader");
 
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -57,7 +58,7 @@ fn main() {
             local.block_on(&rt, async move {
                 let (lcu_tx, mut lcu_rx) = tokio::sync::mpsc::channel::<LcuEvent>(64);
 
-                tokio::task::spawn_local(lcu::monitor(lcu_tx));
+                tokio::task::spawn_local(lcu::monitor(lcu_tx, lcu_config));
 
                 retry_pending_uploads(&uploader).await;
 
@@ -118,7 +119,7 @@ fn main() {
             match msg {
                 AppMsg::Lcu(LcuEvent::Connected) => tray.set_state(TrayState::ClientConnected),
                 AppMsg::Lcu(LcuEvent::Disconnected) => tray.set_state(TrayState::WaitingForClient),
-                AppMsg::Lcu(LcuEvent::SessionUpdate(_)) => tray.set_state(TrayState::InChampSelect),
+                AppMsg::Lcu(LcuEvent::SessionUpdate(_)) => tray.set_state(TrayState::InDraft),
                 AppMsg::Lcu(LcuEvent::SessionDeleted) => tray.set_state(TrayState::ClientConnected),
                 AppMsg::SessionsRecorded(n) => tray.set_session_count(n),
             }

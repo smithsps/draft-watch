@@ -50,6 +50,15 @@ impl Config {
         fs::write(&path, text)?;
         Ok(())
     }
+
+    pub fn save(&self) -> Result<()> {
+        let path = config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, toml::to_string(self)?)?;
+        Ok(())
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -58,3 +67,4 @@ pub fn config_path() -> PathBuf {
         .join("DraftWatch")
         .join("config.toml")
 }
+

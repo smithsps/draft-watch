@@ -13,6 +13,8 @@ use tokio_tungstenite::{
 };
 use tracing::{info, warn};
 
+use crate::config;
+
 #[derive(Debug)]
 pub enum LcuEvent {
     Connected,
@@ -26,14 +28,23 @@ pub struct Credentials {
     pub token: String,
 }
 
-pub async fn monitor(tx: mpsc::Sender<LcuEvent>) {
+pub async fn monitor(tx: mpsc::Sender<LcuEvent>, mut config: config::Config) {
     loop {
-        let creds = loop {
-            match find_credentials() {
-                Ok(c) => break c,
+        let (creds, discovered) = loop {
+            match find_credentials(config.league_path.as_deref()) {
+                Ok(result) => break result,
                 Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
             }
         };
+
+        if let Some(dir) = discovered {
+            let dir_str = dir.to_string_lossy().into_owned();
+            config.league_path = Some(dir_str.clone());
+            match config.save() {
+                Ok(()) => info!("Persisted league_path: {dir_str}"),
+                Err(e) => warn!("Failed to persist league_path: {e}"),
+            }
+        }
 
         info!("League Client found on port {}", creds.port);
         let _ = tx.send(LcuEvent::Connected).await;
@@ -114,11 +125,23 @@ async fn run_websocket(creds: &Credentials, tx: &mpsc::Sender<LcuEvent>) -> Resu
     Ok(())
 }
 
-fn find_credentials() -> Result<Credentials> {
-    find_lockfile().and_then(|p| parse_lockfile(&p))
+/// Returns `(credentials, discovered_install_dir)`.
+/// `discovered_install_dir` is `Some` only when the path was auto-detected and should be persisted.
+fn find_credentials(league_path: Option<&str>) -> Result<(Credentials, Option<PathBuf>)> {
+    let (lf, discovered) = find_lockfile(league_path)?;
+    Ok((parse_lockfile(&lf)?, discovered))
 }
 
-fn find_lockfile() -> Result<PathBuf> {
+fn find_lockfile(league_path: Option<&str>) -> Result<(PathBuf, Option<PathBuf>)> {
+    // If the user has configured an explicit install path, use it exclusively.
+    if let Some(dir) = league_path {
+        let lf = PathBuf::from(dir).join("lockfile");
+        if lf.exists() {
+            return Ok((lf, None));
+        }
+        return Err(anyhow!("Configured league_path has no lockfile: {dir}"));
+    }
+
     use sysinfo::System;
 
     // Try to find by process first
@@ -130,7 +153,7 @@ fn find_lockfile() -> Result<PathBuf> {
                 if let Some(dir) = exe.parent() {
                     let lf = dir.join("lockfile");
                     if lf.exists() {
-                        return Ok(lf);
+                        return Ok((lf, Some(dir.to_path_buf())));
                     }
                 }
             }
@@ -147,7 +170,8 @@ fn find_lockfile() -> Result<PathBuf> {
     for path in candidates {
         let p = PathBuf::from(path);
         if p.exists() {
-            return Ok(p);
+            let dir = p.parent().map(|d| d.to_path_buf());
+            return Ok((p, dir));
         }
     }
 
