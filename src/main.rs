@@ -150,7 +150,7 @@ async fn commit_session(
         .unwrap_or("")
         .to_string();
 
-    let ndjson = match std::fs::read_to_string(&path) {
+    let jsonl = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
             error!("Read error for {filename}: {e}");
@@ -158,7 +158,7 @@ async fn commit_session(
         }
     };
 
-    match uploader.upload(&ndjson).await {
+    match uploader.upload(&jsonl).await {
         Ok(true) => {
             if let Err(e) = storage::mark_uploaded(&filename) {
                 error!("Failed to mark {filename} uploaded: {e}");
@@ -195,7 +195,7 @@ async fn retry_pending_uploads(uploader: &uploader::Uploader) {
             .unwrap_or("")
             .to_string();
 
-        let ndjson = match std::fs::read_to_string(&path) {
+        let jsonl = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to read {filename}: {e}");
@@ -203,7 +203,7 @@ async fn retry_pending_uploads(uploader: &uploader::Uploader) {
             }
         };
 
-        match uploader.upload(&ndjson).await {
+        match uploader.upload(&jsonl).await {
             Ok(true) => {
                 if let Err(e) = storage::mark_uploaded(&filename) {
                     error!("Failed to mark {filename} uploaded: {e}");

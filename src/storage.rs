@@ -44,14 +44,14 @@ impl SessionBuffer {
         fs::create_dir_all(&dir)?;
 
         let filename = match self.last_game_id {
-            Some(id) => format!("{id}.ndjson"),
+            Some(id) => format!("{id}.jsonl"),
             None => {
                 let ts = self.first_ts.as_deref().unwrap_or("unknown");
                 let safe: String = ts
                     .chars()
                     .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
                     .collect();
-                format!("{safe}.ndjson")
+                format!("{safe}.jsonl")
             }
         };
 
@@ -89,7 +89,7 @@ pub fn session_count() -> usize {
     fs::read_dir(&dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("ndjson"))
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
                 .count()
         })
         .unwrap_or(0)
@@ -106,7 +106,7 @@ pub fn pending_files() -> Result<Vec<PathBuf>> {
 
     for entry in fs::read_dir(&dir)? {
         let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("ndjson") {
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
         let name = path

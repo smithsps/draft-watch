@@ -17,7 +17,7 @@ impl Uploader {
         Ok(Self { client, config })
     }
 
-    pub async fn upload(&self, ndjson: &str) -> Result<bool> {
+    pub async fn upload(&self, jsonl: &str) -> Result<bool> {
         let url = match self.config.upload_url.as_deref().filter(|s| !s.is_empty()) {
             Some(u) => u.to_string(),
             None => return Ok(false),
@@ -27,7 +27,7 @@ impl Uploader {
             .client
             .post(&url)
             .header("Content-Type", "application/x-ndjson")
-            .body(ndjson.to_string());
+            .body(jsonl.to_string());
 
         if let Some(key) = self.config.upload_api_key.as_deref().filter(|s| !s.is_empty()) {
             req = req.header("X-Api-Key", key);
