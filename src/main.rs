@@ -11,6 +11,7 @@ mod lcu;
 mod storage;
 mod tray;
 mod uploader;
+mod viewer;
 
 use config::Config;
 use lcu::LcuEvent;
@@ -19,6 +20,7 @@ use tray::{Tray, TrayState};
 enum AppMsg {
     Lcu(LcuEvent),
     SessionsRecorded(usize),
+    ViewerReady(u16),
 }
 
 fn main() {
@@ -56,6 +58,9 @@ fn main() {
 
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
+                let port = viewer::start().await;
+                let _ = app_tx.send(AppMsg::ViewerReady(port));
+
                 let (lcu_tx, mut lcu_rx) = tokio::sync::mpsc::channel::<LcuEvent>(64);
 
                 tokio::task::spawn_local(lcu::monitor(lcu_tx, lcu_config));
@@ -122,6 +127,7 @@ fn main() {
                 AppMsg::Lcu(LcuEvent::SessionUpdate(_)) => tray.set_state(TrayState::InDraft),
                 AppMsg::Lcu(LcuEvent::SessionDeleted) => tray.set_state(TrayState::ClientConnected),
                 AppMsg::SessionsRecorded(n) => tray.set_session_count(n),
+                AppMsg::ViewerReady(port) => tray.set_viewer_port(port),
             }
         }
 

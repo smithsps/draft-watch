@@ -19,22 +19,27 @@ pub enum TrayState {
 
 pub struct Tray {
     icon: TrayIcon,
+    status_item: MenuItem,
     count_item: MenuItem,
+    view_history_item: MenuItem,
     open_folder_item: MenuItem,
     quit_item: MenuItem,
     state: TrayState,
+    viewer_port: Option<u16>,
 }
 
 impl Tray {
     pub fn new() -> Result<Self> {
-        let status_item = MenuItem::new("DraftWatch Monitor", false, None);
+        let status_item = MenuItem::new("Sleeping", false, None);
         let count_item = MenuItem::new("0 matches recorded", false, None);
+        let view_history_item = MenuItem::new("View History", true, None);
         let open_folder_item = MenuItem::new("Open Folder", true, None);
         let quit_item = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
         menu.append(&status_item)?;
         menu.append(&count_item)?;
+        menu.append(&view_history_item)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&open_folder_item)?;
         menu.append(&PredefinedMenuItem::separator())?;
@@ -44,17 +49,24 @@ impl Tray {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("DraftWatch — waiting for League Client")
+            .with_tooltip("DraftWatch — Sleeping")
             .with_icon(icon)
             .build()?;
 
         Ok(Self {
             icon: tray,
+            status_item,
             count_item,
+            view_history_item,
             open_folder_item,
             quit_item,
             state: TrayState::WaitingForClient,
+            viewer_port: None,
         })
+    }
+
+    pub fn set_viewer_port(&mut self, port: u16) {
+        self.viewer_port = Some(port);
     }
 
     pub fn set_session_count(&self, n: usize) {
@@ -72,12 +84,13 @@ impl Tray {
         }
         self.state = state;
 
-        let tooltip = match state {
-            TrayState::WaitingForClient => "DraftWatch — waiting for League Client",
-            TrayState::ClientConnected => "DraftWatch — client connected",
-            TrayState::InDraft => "DraftWatch — in champion select!",
+        let (status, tooltip) = match state {
+            TrayState::WaitingForClient => ("Sleeping", "DraftWatch — Sleeping"),
+            TrayState::ClientConnected  => ("Watching client", "DraftWatch — Watching client"),
+            TrayState::InDraft          => ("Recording draft", "DraftWatch — Recording draft"),
         };
 
+        self.status_item.set_text(status);
         let _ = self.icon.set_icon(Some(make_icon(state)));
         let _ = self.icon.set_tooltip(Some(tooltip));
     }
@@ -92,18 +105,30 @@ impl Tray {
                 std::fs::create_dir_all(&dir).ok();
                 let _ = std::process::Command::new("explorer").arg(&dir).spawn();
             }
+            if event.id == *self.view_history_item.id() {
+                if let Some(port) = self.viewer_port {
+                    let url = format!("http://127.0.0.1:{port}/");
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &url])
+                        .spawn();
+                }
+            }
         }
         false
     }
 }
 
-/// Solid-colour 16×16 RGBA icon: grey / green / blue by state.
+static ICON_Z: &[u8] = include_bytes!("../assets/Icon_Z.png");
+static ICON_W: &[u8] = include_bytes!("../assets/Icon_W.png");
+static ICON_D: &[u8] = include_bytes!("../assets/Icon_D.png");
+
 fn make_icon(state: TrayState) -> Icon {
-    let color: [u8; 4] = match state {
-        TrayState::WaitingForClient => [120, 120, 120, 255],
-        TrayState::ClientConnected => [40, 180, 80, 255],
-        TrayState::InDraft => [30, 120, 255, 255],
+    let data = match state {
+        TrayState::WaitingForClient => ICON_Z,
+        TrayState::ClientConnected => ICON_W,
+        TrayState::InDraft => ICON_D,
     };
-    let pixels: Vec<u8> = (0..16 * 16).flat_map(|_| color).collect();
-    Icon::from_rgba(pixels, 16, 16).expect("valid icon")
+    let img = image::load_from_memory(data).expect("valid png").to_rgba8();
+    let (w, h) = img.dimensions();
+    Icon::from_rgba(img.into_raw(), w, h).expect("valid icon")
 }
