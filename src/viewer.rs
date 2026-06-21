@@ -334,11 +334,13 @@ struct SwapEvent {
 
 struct Action {
     id: u32,
-    kind: String, // "ban" | "pick"
+    kind: String, // "ban" | "pick" — ten_bans_reveal is filtered out
     actor_cell_id: u32,
     champion_id: u32,
 }
 
+// Builds cellId → assignedPosition from both teams. Position changes between snapshots
+// indicate a completed pick-order or position swap (see pickOrderSwaps / positionSwaps).
 fn event_positions(ev: &Value) -> HashMap<u32, String> {
     [&ev["myTeam"], &ev["theirTeam"]]
         .iter()
@@ -353,6 +355,9 @@ fn event_positions(ev: &Value) -> HashMap<u32, String> {
         .collect()
 }
 
+// Returns the highest completed ban/pick action ID at this snapshot. Used to anchor swap
+// events to the correct position in the timeline. Intentionally excludes ten_bans_reveal
+// (id ≈ 104) which has a non-sequential ID and would push swaps past all pick actions.
 fn highest_completed_action(ev: &Value) -> Option<u32> {
     ev["actions"]
         .as_array()?
@@ -417,6 +422,10 @@ fn render_session(filename: &str) -> String {
                 first_ts = record["ts"].as_str().map(str::to_string);
             }
             if let Some(ev) = record.get("event").cloned() {
+                // Detect which swap type is in-flight before positions change.
+                // pickOrderSwaps / positionSwaps go BUSY one or more snapshots before
+                // assignedPosition updates; BUSY resolves at the same snapshot the
+                // position change appears, so we track the last-seen BUSY type.
                 let has_busy = |field: &str| {
                     ev[field].as_array()
                         .map(|a| a.iter().any(|s| s["state"].as_str() == Some("BUSY")))
@@ -431,6 +440,9 @@ fn render_session(filename: &str) -> String {
                 let new_positions = event_positions(&ev);
                 let new_pick_nums = event_pick_numbers(&ev);
                 let after = highest_completed_action(&ev);
+                // Each change in assignedPosition is one half of a swap (two players
+                // always swap simultaneously, so each completed swap emits two SwapEvents
+                // that are later paired in render_swap_group).
                 for (cell_id, new_pos) in &new_positions {
                     if let Some(old_pos) = pos_state.get(cell_id) {
                         if old_pos != new_pos {
@@ -539,8 +551,10 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_even
     }
     actions.sort_by_key(|a| a.id);
 
-    // Build a map of cell_id → first picked champion (the one they originally selected).
-    // If a player's final champion differs, they traded with whoever originally picked their champ.
+    // Champion trade detection: compare each player's first locked champion (from the
+    // pick actions) against their final championId in the roster. A mismatch means a
+    // trade occurred — the client's `trades` array only tracks slot availability/state
+    // and does not record which champions were exchanged or when, so we infer it here.
     let pick_map: HashMap<u32, u32> = actions
         .iter()
         .filter(|a| a.kind == "pick" && a.champion_id > 0)
