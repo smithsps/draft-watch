@@ -16,7 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.31"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "net"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 toml = "0.8"
 tray-icon = "0.19"
