@@ -177,6 +177,7 @@ fn render_list() -> String {
         champ_pos: String,
         player_name: String,
         game_id: Option<i64>,
+        is_complete: bool,
     }
 
     let dir = sessions_dir();
@@ -199,9 +200,11 @@ fn render_list() -> String {
                 })
                 .unwrap_or_default();
 
-            let (queue, champ_img, champ_pos, player_name, game_id) = if let Some(ev) = last_event {
+            let (queue, champ_img, champ_pos, player_name, game_id, is_complete) = if let Some(ev) = last_event {
                 let qid = ev["queueId"].as_u64().unwrap_or(0) as u32;
                 let game_id = ev["gameId"].as_i64().filter(|&id| id != 0);
+                let phase = ev["timer"]["phase"].as_str().unwrap_or("");
+                let is_complete = matches!(phase, "GAME_STARTING" | "FINALIZATION");
                 let local_cell = ev["localPlayerCellId"].as_u64().unwrap_or(0) as u32;
 
                 let local_player = [&ev["myTeam"], &ev["theirTeam"]]
@@ -238,12 +241,12 @@ fn render_list() -> String {
                     (r#"<span class="card-portrait-ph"></span>"#.into(), String::new(), String::new())
                 };
 
-                (queue_name(qid), champ_img, champ_pos, player_name, game_id)
+                (queue_name(qid), champ_img, champ_pos, player_name, game_id, is_complete)
             } else {
-                ("Custom", r#"<span class="card-portrait-ph"></span>"#.into(), String::new(), String::new(), None)
+                ("Custom", r#"<span class="card-portrait-ph"></span>"#.into(), String::new(), String::new(), None, true)
             };
 
-            entries.push(Entry { dt, name, queue, champ_img, champ_pos, player_name, game_id });
+            entries.push(Entry { dt, name, queue, champ_img, champ_pos, player_name, game_id, is_complete });
         }
     }
 
@@ -268,11 +271,17 @@ fn render_list() -> String {
             } else {
                 String::new()
             };
+            let aborted_html = if !e.is_complete {
+                r#"<span class="card-aborted">Aborted</span>"#
+            } else {
+                ""
+            };
             format!(
-                r#"<a href="/session/{name}" class="card">{champ_img}<div class="card-info"><span class="card-queue">{queue}</span><span class="card-champ">{champ_pos}</span><span class="card-meta">{meta}</span></div>{player_html}</a>"#,
+                r#"<a href="/session/{name}" class="card">{champ_img}<div class="card-info"><span class="card-queue">{queue}{aborted_html}</span><span class="card-champ">{champ_pos}</span><span class="card-meta">{meta}</span></div>{player_html}</a>"#,
                 name = esc(&e.name),
                 champ_img = e.champ_img,
                 queue = esc(e.queue),
+                aborted_html = aborted_html,
                 champ_pos = e.champ_pos,
                 meta = esc(&meta),
             )
@@ -308,11 +317,82 @@ struct Player {
     team_id: u32,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SwapKind {
+    PickOrder,
+    Position,
+}
+
+struct SwapEvent {
+    cell_id: u32,
+    from_pos: String,
+    to_pos: String,
+    after_action_id: Option<u32>, // None = before any ban/pick; Some(id) = after that action
+    pick_number: Option<u8>,      // overall draft pick slot (1st, 2nd, … 10th)
+    kind: SwapKind,
+}
+
 struct Action {
     id: u32,
     kind: String, // "ban" | "pick"
     actor_cell_id: u32,
     champion_id: u32,
+}
+
+fn event_positions(ev: &Value) -> HashMap<u32, String> {
+    [&ev["myTeam"], &ev["theirTeam"]]
+        .iter()
+        .filter_map(|t| t.as_array())
+        .flatten()
+        .filter_map(|p| {
+            let cell_id = p["cellId"].as_u64()? as u32;
+            let pos = p["assignedPosition"].as_str()?.to_string();
+            if pos.is_empty() { return None; }
+            Some((cell_id, pos))
+        })
+        .collect()
+}
+
+fn highest_completed_action(ev: &Value) -> Option<u32> {
+    ev["actions"]
+        .as_array()?
+        .iter()
+        .filter_map(|g| g.as_array())
+        .flatten()
+        .filter(|a| a["completed"].as_bool().unwrap_or(false))
+        .filter(|a| matches!(a["type"].as_str(), Some("ban") | Some("pick")))
+        .filter_map(|a| a["id"].as_u64())
+        .map(|id| id as u32)
+        .max()
+}
+
+fn ordinal(n: u8) -> String {
+    let suffix = match n % 10 {
+        1 if n % 100 != 11 => "st",
+        2 if n % 100 != 12 => "nd",
+        3 if n % 100 != 13 => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+// Returns cellId → overall draft pick slot (1-based), derived from pick action ordering.
+fn event_pick_numbers(ev: &Value) -> HashMap<u32, u8> {
+    let mut picks: Vec<(u32, u32)> = ev["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|g| g.as_array())
+        .flatten()
+        .filter(|a| a["type"].as_str() == Some("pick"))
+        .filter_map(|a| {
+            Some((a["id"].as_u64()? as u32, a["actorCellId"].as_u64()? as u32))
+        })
+        .collect();
+    picks.sort_by_key(|(id, _)| *id);
+    picks.into_iter().enumerate()
+        .map(|(i, (_, cell_id))| (cell_id, (i + 1) as u8))
+        .collect()
 }
 
 fn render_session(filename: &str) -> String {
@@ -324,6 +404,9 @@ fn render_session(filename: &str) -> String {
 
     let mut last_event: Option<Value> = None;
     let mut first_ts: Option<String> = None;
+    let mut pos_state: HashMap<u32, String> = HashMap::new();
+    let mut swap_events: Vec<SwapEvent> = Vec::new();
+    let mut last_busy_kind: Option<SwapKind> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -334,19 +417,53 @@ fn render_session(filename: &str) -> String {
                 first_ts = record["ts"].as_str().map(str::to_string);
             }
             if let Some(ev) = record.get("event").cloned() {
+                let has_busy = |field: &str| {
+                    ev[field].as_array()
+                        .map(|a| a.iter().any(|s| s["state"].as_str() == Some("BUSY")))
+                        .unwrap_or(false)
+                };
+                if has_busy("pickOrderSwaps") {
+                    last_busy_kind = Some(SwapKind::PickOrder);
+                } else if has_busy("positionSwaps") {
+                    last_busy_kind = Some(SwapKind::Position);
+                }
+
+                let new_positions = event_positions(&ev);
+                let new_pick_nums = event_pick_numbers(&ev);
+                let after = highest_completed_action(&ev);
+                for (cell_id, new_pos) in &new_positions {
+                    if let Some(old_pos) = pos_state.get(cell_id) {
+                        if old_pos != new_pos {
+                            swap_events.push(SwapEvent {
+                                cell_id: *cell_id,
+                                from_pos: old_pos.clone(),
+                                to_pos: new_pos.clone(),
+                                after_action_id: after,
+                                pick_number: new_pick_nums.get(cell_id).copied(),
+                                kind: last_busy_kind.unwrap_or(SwapKind::PickOrder),
+                            });
+                        }
+                    }
+                }
+                if !new_positions.is_empty() && new_positions != pos_state {
+                    last_busy_kind = None;
+                }
+                pos_state = new_positions;
                 last_event = Some(ev);
             }
         }
     }
 
     match last_event {
-        Some(ev) => render_draft(filename, first_ts.as_deref(), &ev),
+        Some(ev) => render_draft(filename, first_ts.as_deref(), &ev, &swap_events),
         None => error_page("No valid events found in session."),
     }
 }
 
-fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value) -> String {
+fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_events: &[SwapEvent]) -> String {
     let game_id = event["gameId"].as_i64().filter(|&id| id != 0);
+    let phase = event["timer"]["phase"].as_str().unwrap_or("");
+    let is_complete = matches!(phase, "GAME_STARTING" | "FINALIZATION");
     let local_cell = event["localPlayerCellId"].as_u64().unwrap_or(0) as u32;
 
     // Collect all players from both teams
@@ -468,8 +585,19 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value) -> String
 
     let blue_html = render_roster(&blue, local_cell);
     let red_html = render_roster(&red, local_cell);
-    let timeline_html = render_timeline(&actions, &players, &cell_idx, local_cell);
-    let trades_section = render_trades(&trade_pairs, &players);
+    let bench_html = render_bench(event);
+    let timeline_html = render_timeline(&actions, &players, &cell_idx, local_cell, &trade_pairs, swap_events);
+
+    let abort_notice = if !is_complete {
+        let reason = match phase {
+            "PLANNING" => "session ended during planning — no picks or bans were made",
+            "BAN_PICK" => "session ended mid-draft — bans and picks are incomplete",
+            _ => "session ended before the draft completed",
+        };
+        format!(r#"<div class="abort-notice">Draft aborted — {reason}</div>"#)
+    } else {
+        String::new()
+    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -482,6 +610,7 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value) -> String
   <h1>{title_esc}</h1>
 </header>
 <main>
+  {abort_notice}
   <div class="teams">
     <div class="team blue-side">
       <h2 class="team-title blue">{blue_label}</h2>
@@ -492,7 +621,7 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value) -> String
       {red_html}
     </div>
   </div>
-  {trades_section}
+  {bench_html}
   <div class="tl-wrap">
     <h2 class="section-title">Draft Order</h2>
     <ol class="tl">{timeline_html}</ol>
@@ -501,12 +630,39 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value) -> String
 </body></html>"#,
         title_esc = esc(&title),
         DETAIL_CSS = DETAIL_CSS,
+        abort_notice = abort_notice,
         blue_label = esc(blue_label),
         red_label = esc(red_label),
         blue_html = blue_html,
         red_html = red_html,
-        trades_section = trades_section,
+        bench_html = bench_html,
         timeline_html = timeline_html,
+    )
+}
+
+fn render_bench(event: &Value) -> String {
+    if !event["benchEnabled"].as_bool().unwrap_or(false) {
+        return String::new();
+    }
+    let champs = match event["benchChampions"].as_array() {
+        Some(a) if !a.is_empty() => a,
+        _ => return String::new(),
+    };
+    let rerolls = event["rerollsRemaining"].as_u64().unwrap_or(0);
+    let rerolls_html = format!(
+        r#"<span class="bench-rerolls">{rerolls} reroll{s} remaining</span>"#,
+        s = if rerolls == 1 { "" } else { "s" },
+    );
+    let items: String = champs.iter().map(|c| {
+        let id = c["championId"].as_u64().unwrap_or(0) as u32;
+        let name = if id > 0 { champ_name(id) } else { "Unknown" };
+        let img = champ_img_url(id)
+            .map(|url| format!(r#"<img class="bench-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(name)))
+            .unwrap_or_else(|| r#"<span class="bench-portrait-ph"></span>"#.into());
+        format!(r#"<div class="bench-champ">{img}<span class="bench-name">{}</span></div>"#, esc(name))
+    }).collect();
+    format!(
+        r#"<div class="bench-wrap"><h2 class="section-title">Bench <span class="bench-rerolls-wrap">{rerolls_html}</span></h2><div class="bench-row">{items}</div></div>"#,
     )
 }
 
@@ -541,19 +697,147 @@ fn render_roster(players: &[&Player], local_cell: u32) -> String {
         .collect()
 }
 
+
+fn swap_side(s: &SwapEvent, p: Option<&&Player>) -> String {
+    let champ_id = p.map(|pl| pl.champion_id).unwrap_or(0);
+    let champ = if champ_id > 0 { champ_name(champ_id) } else { "" };
+    let img = champ_img_url(champ_id)
+        .map(|url| format!(r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(champ)))
+        .unwrap_or_else(|| r#"<span class="tl-portrait-ph"></span>"#.into());
+    let pick = s.pick_number
+        .map(|n| ordinal(n))
+        .unwrap_or_else(|| "—".into());
+    let name = p.filter(|pl| !pl.display_name.is_empty())
+        .map(|pl| format!(r#"<span class="actor">{}</span>"#, esc(&pl.display_name)))
+        .unwrap_or_default();
+    let label = format!(
+        r#"<span class="trade-label"><span class="champ">{pick}</span>{name}</span>"#,
+    );
+    format!("{img}{label}")
+}
+
+fn render_swap_row(s: &SwapEvent, cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
+    let p = cell_to_player.get(&s.cell_id);
+    let you = if p.map(|pl| pl.cell_id) == Some(local_cell) {
+        r#"<span class="you">YOU</span>"#
+    } else {
+        r#"<span class="you" style="visibility:hidden">YOU</span>"#
+    };
+    let side = swap_side(s, p);
+    let (cls, dot_cls, sub) = swap_kind_attrs(s.kind);
+    format!(
+        r#"<li class="action {cls}"><span class="n"></span><span class="dot {dot_cls}"></span><span class="tb">SWAP</span><span class="swap-sub">{sub}</span><div class="trade-inline">{side}</div>{you}</li>"#,
+    )
+}
+
+fn render_swap_pair_row(s1: &SwapEvent, s2: &SwapEvent, cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
+    let pa = cell_to_player.get(&s1.cell_id);
+    let pb = cell_to_player.get(&s2.cell_id);
+    let involved = pa.map(|p| p.cell_id) == Some(local_cell)
+        || pb.map(|p| p.cell_id) == Some(local_cell);
+    let you = if involved {
+        r#"<span class="you">YOU</span>"#
+    } else {
+        r#"<span class="you" style="visibility:hidden">YOU</span>"#
+    };
+    let side_a = swap_side(s1, pa);
+    let side_b = swap_side(s2, pb);
+    let (cls, dot_cls, sub) = swap_kind_attrs(s1.kind);
+    format!(
+        r#"<li class="action {cls}"><span class="n"></span><span class="dot {dot_cls}"></span><span class="tb">SWAP</span><span class="swap-sub">{sub}</span><div class="trade-inline">{side_a}<span class="trade-inline-arrow">&#8596;</span>{side_b}</div>{you}</li>"#,
+    )
+}
+
+// Returns (li-class, dot-class, sub-label) — the "SWAP" prefix is rendered separately.
+fn swap_kind_attrs(kind: SwapKind) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        SwapKind::PickOrder => ("swap-order", "order-dot", "PICK"),
+        SwapKind::Position  => ("swap-role",  "role-dot",  "ROLE"),
+    }
+}
+
+fn render_swap_group(swaps: &[&SwapEvent], cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
+    let mut used = vec![false; swaps.len()];
+    let mut html = String::new();
+    for i in 0..swaps.len() {
+        if used[i] { continue; }
+        // Find a mirror partner: the other side of the same 2-way role swap.
+        let partner = (i + 1..swaps.len()).find(|&j| {
+            !used[j]
+                && swaps[j].from_pos == swaps[i].to_pos
+                && swaps[j].to_pos == swaps[i].from_pos
+        });
+        if let Some(j) = partner {
+            used[i] = true;
+            used[j] = true;
+            html.push_str(&render_swap_pair_row(swaps[i], swaps[j], cell_to_player, local_cell));
+        } else {
+            used[i] = true;
+            html.push_str(&render_swap_row(swaps[i], cell_to_player, local_cell));
+        }
+    }
+    html
+}
+
 fn render_timeline(
     actions: &[Action],
     players: &[Player],
     cell_idx: &HashMap<u32, usize>,
     local_cell: u32,
+    trade_pairs: &[(u32, u32, u32, u32)],
+    swap_events: &[SwapEvent],
 ) -> String {
     let mut html = String::new();
+    let cell_to_player: HashMap<u32, &Player> = players.iter().map(|p| (p.cell_id, p)).collect();
+
+    // Partition swaps: those before any ban/pick go at the top under "Pick Swaps";
+    // others are keyed by the action after which they occurred and inserted inline.
+    // If after_action_id points to an action not in the rendered set (e.g. ten_bans_reveal),
+    // remap to the largest rendered action ID that precedes it.
+    let rendered_ids: std::collections::BTreeSet<u32> = actions.iter().map(|a| a.id).collect();
+    let resolve_action_id = |id: u32| -> Option<u32> {
+        rendered_ids.range(..=id).next_back().copied()
+    };
+
+    let mut pre_swaps: Vec<&SwapEvent> = Vec::new();
+    let mut swaps_after: HashMap<u32, Vec<&SwapEvent>> = HashMap::new();
+    for s in swap_events {
+        match s.after_action_id {
+            None => pre_swaps.push(s),
+            Some(id) => match resolve_action_id(id) {
+                Some(resolved) => swaps_after.entry(resolved).or_default().push(s),
+                None => pre_swaps.push(s),
+            },
+        }
+    }
+    if !pre_swaps.is_empty() {
+        html.push_str(r#"<li class="phase-div">Swaps</li>"#);
+        html.push_str(&render_swap_group(&pre_swaps, &cell_to_player, local_cell));
+    }
+
+    // Build map: action_id → trades to insert after it.
+    // A trade inserts after the later of the two players' pick action IDs.
+    let last_pick_id: HashMap<u32, u32> = actions
+        .iter()
+        .filter(|a| a.kind == "pick" && a.champion_id > 0)
+        .fold(HashMap::new(), |mut m, a| {
+            let e = m.entry(a.actor_cell_id).or_insert(a.id);
+            if a.id > *e { *e = a.id; }
+            m
+        });
+    let mut trades_after: HashMap<u32, Vec<(u32, u32, u32, u32)>> = HashMap::new();
+    for &tp in trade_pairs {
+        let (cell_a, _, cell_b, _) = tp;
+        let id_a = last_pick_id.get(&cell_a).copied().unwrap_or(0);
+        let id_b = last_pick_id.get(&cell_b).copied().unwrap_or(0);
+        trades_after.entry(id_a.max(id_b)).or_default().push(tp);
+    }
+
     let mut prev_kind = "";
     let mut ban_phase = 0u32;
     let mut pick_phase = 0u32;
 
     for (i, a) in actions.iter().enumerate() {
-        // Insert a phase divider whenever the action type flips
         if a.kind.as_str() != prev_kind {
             let label = if a.kind == "ban" {
                 ban_phase += 1;
@@ -575,12 +859,7 @@ fn render_timeline(
         let type_label = if a.kind == "ban" { "BAN" } else { "PICK" };
         let champ = if a.champion_id > 0 { champ_name(a.champion_id) } else { "—" };
         let img_html = champ_img_url(a.champion_id)
-            .map(|url| {
-                format!(
-                    r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#,
-                    esc(champ)
-                )
-            })
+            .map(|url| format!(r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(champ)))
             .unwrap_or_default();
         let actor_html = player
             .map(|p| {
@@ -607,60 +886,51 @@ fn render_timeline(
             img_html = img_html,
             champ = esc(champ),
         ));
+
+        // Insert any trades that happened after this pick.
+        if let Some(trades) = trades_after.get(&a.id) {
+            for &(cell_a, champ_a_orig, cell_b, champ_b_orig) in trades {
+                let pa = cell_to_player.get(&cell_a);
+                let pb = cell_to_player.get(&cell_b);
+                let tl_img = |cid: u32| {
+                    let cn = if cid > 0 { champ_name(cid) } else { "—" };
+                    champ_img_url(cid)
+                        .map(|url| format!(r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(cn)))
+                        .unwrap_or_default()
+                };
+                let side = |p: Option<&&Player>, orig: u32| {
+                    let cn = if orig > 0 { champ_name(orig) } else { "—" };
+                    let name = p.filter(|pl| !pl.display_name.is_empty())
+                        .map(|pl| format!(r#" · <span class="actor">{}</span>"#, esc(&pl.display_name)))
+                        .unwrap_or_default();
+                    format!(r#"<span class="trade-label"><span class="champ">{}</span>{name}</span>"#, esc(cn))
+                };
+                let involved = pa.map(|p| p.cell_id) == Some(local_cell)
+                    || pb.map(|p| p.cell_id) == Some(local_cell);
+                let you = if involved {
+                    r#"<span class="you">YOU</span>"#
+                } else {
+                    r#"<span class="you" style="visibility:hidden">YOU</span>"#
+                };
+                html.push_str(&format!(
+                    r#"<li class="action trade"><span class="n"></span><span class="dot trade-dot"></span><span class="tb">TRADE</span><div class="trade-inline">{img_a}{side_a}<span class="trade-inline-arrow">&#8646;</span>{side_b}{img_b}</div>{you}</li>"#,
+                    img_a = tl_img(champ_a_orig),
+                    side_a = side(pa, champ_a_orig),
+                    img_b = tl_img(champ_b_orig),
+                    side_b = side(pb, champ_b_orig),
+                ));
+            }
+        }
+
+        // Insert any pick swaps that happened after this action.
+        if let Some(swaps) = swaps_after.get(&a.id) {
+            html.push_str(&render_swap_group(swaps, &cell_to_player, local_cell));
+        }
     }
 
     html
 }
 
-fn render_trades(pairs: &[(u32, u32, u32, u32)], players: &[Player]) -> String {
-    if pairs.is_empty() {
-        return String::new();
-    }
-    let cell_to_player: HashMap<u32, &Player> =
-        players.iter().map(|p| (p.cell_id, p)).collect();
-
-    let rows: String = pairs
-        .iter()
-        .map(|&(cell_a, champ_a_orig, cell_b, champ_b_orig)| {
-            let pa = cell_to_player.get(&cell_a);
-            let pb = cell_to_player.get(&cell_b);
-            let name_a = pa.map(|p| p.display_name.as_str()).unwrap_or("").to_string();
-            let name_b = pb.map(|p| p.display_name.as_str()).unwrap_or("").to_string();
-
-            let img = |cid: u32| -> String {
-                let champ = if cid > 0 { champ_name(cid) } else { "—" };
-                champ_img_url(cid)
-                    .map(|url| format!(r#"<img class="trade-portrait" src="{url}" alt="{}">"#, esc(champ)))
-                    .unwrap_or_else(|| r#"<span class="trade-portrait-ph"></span>"#.into())
-            };
-
-            let label = |name: &str, orig: u32, _final: u32| -> String {
-                let champ_orig = if orig > 0 { champ_name(orig) } else { "—" };
-                if name.is_empty() {
-                    format!(r#"<span class="trade-champ">{}</span>"#, esc(champ_orig))
-                } else {
-                    format!(
-                        r#"<span class="trade-champ">{}</span><span class="trade-name">{}</span>"#,
-                        esc(champ_orig),
-                        esc(name)
-                    )
-                }
-            };
-
-            format!(
-                r#"<div class="trade-row">{img_a}<div class="trade-side">{label_a}</div><span class="trade-arrow">&#8646;</span><div class="trade-side">{label_b}</div>{img_b}</div>"#,
-                img_a = img(champ_a_orig),
-                label_a = label(&name_a, champ_a_orig, champ_b_orig),
-                img_b = img(champ_b_orig),
-                label_b = label(&name_b, champ_b_orig, champ_a_orig),
-            )
-        })
-        .collect();
-
-    format!(
-        r#"<div class="tl-wrap"><h2 class="section-title">Trades</h2><div class="trades">{rows}</div></div>"#
-    )
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -725,6 +995,7 @@ main{max-width:700px;margin:24px auto;padding:0 24px}
 .card-champ{font-weight:600;color:#e8e0d0;font-size:.95em}
 .card-meta{font-size:.78em;color:#555}
 .card-player{margin-left:auto;font-size:.8em;color:#777;align-self:flex-start;flex-shrink:0;padding-left:8px}
+.card-aborted{font-size:.65em;font-weight:700;background:rgba(212,74,74,.15);color:#d44a4a;padding:1px 5px;border-radius:2px;margin-left:6px;vertical-align:middle}
 .empty{color:#444;padding:32px 0}
 ";
 
@@ -773,13 +1044,31 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .portrait-ph{width:36px;height:36px;border-radius:3px;background:#1a2a4a;flex-shrink:0}
 .tl-portrait{width:24px;height:24px;border-radius:2px;object-fit:cover;flex-shrink:0;background:#1a2a4a}
 .action.ban .tl-portrait{filter:grayscale(1) opacity(.35)}
-.trades{display:flex;flex-direction:column;gap:0}
-.trade-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05)}
-.trade-row:last-child{border-bottom:none}
-.trade-portrait{width:32px;height:32px;border-radius:3px;object-fit:cover;flex-shrink:0;background:#1a2a4a}
-.trade-portrait-ph{width:32px;height:32px;border-radius:3px;background:#1a2a4a;flex-shrink:0}
-.trade-side{display:flex;flex-direction:column;gap:2px;min-width:100px}
-.trade-champ{font-weight:600;color:#e8e0d0;font-size:.9em}
-.trade-name{font-size:.75em;color:#666}
-.trade-arrow{color:#c8aa6e;font-size:1.2em;flex-shrink:0}
+.abort-notice{background:rgba(212,74,74,.08);border:1px solid rgba(212,74,74,.25);color:#c06060;padding:10px 16px;border-radius:4px;font-size:.85em;margin-bottom:20px}
+.action.trade{background:rgba(200,170,110,.07)}
+.action.swap-order{background:rgba(74,159,212,.07)}
+.action.swap-role{background:rgba(140,100,220,.07)}
+.trade-dot{background:#c8aa6e !important}
+.order-dot{background:#4a9fd4 !important}
+.role-dot{background:#8c64dc !important}
+.action.trade .tb{color:#c8aa6e}
+.action.swap-order .tb{color:#4a9fd4}
+.action.swap-role .tb{color:#8c64dc}
+.action.swap-order .trade-inline-arrow{color:#4a9fd4}
+.action.swap-role .trade-inline-arrow{color:#8c64dc}
+.swap-sub{font-size:.6em;font-weight:700;text-transform:uppercase;color:#555;margin-right:6px;flex-shrink:0;align-self:center}
+.trade-label .actor{margin-left:4px}
+.trade-inline{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.trade-label{display:flex;align-items:baseline;gap:4px;min-width:0;flex-shrink:1}
+.trade-label .champ{font-weight:600;color:#e8e0d0;white-space:nowrap;flex-shrink:0}
+.trade-label .actor{font-size:.8em;color:#555;white-space:nowrap;flex:none;overflow:hidden;text-overflow:ellipsis}
+.trade-inline-arrow{color:#c8aa6e;font-size:1.1em;flex-shrink:0}
+.bench-wrap{margin-bottom:32px}
+.bench-rerolls-wrap{font-weight:400;text-transform:none;letter-spacing:0}
+.bench-rerolls{font-size:.8em;color:#555}
+.bench-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}
+.bench-champ{display:flex;flex-direction:column;align-items:center;gap:4px;width:52px}
+.bench-portrait{width:48px;height:48px;border-radius:3px;object-fit:cover;background:#1a2a4a}
+.bench-portrait-ph{width:48px;height:48px;border-radius:3px;background:#1a2a4a;display:block}
+.bench-name{font-size:.6em;color:#666;text-align:center;line-height:1.2;word-break:break-word}
 ";
