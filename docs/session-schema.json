@@ -1,0 +1,413 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-schema.json",
+  "title": "DraftWatch Session",
+  "description": "Each session is stored as a JSONL file (one JSON object per line). Every line is a Record capturing one snapshot of the League client champ-select session state, emitted whenever the client fires an update event. The filename is '<gameId>.jsonl' when the game ID is known, otherwise '<first-timestamp>.jsonl'.",
+
+  "$defs": {
+
+    "Record": {
+      "description": "One snapshot line in the JSONL file.",
+      "type": "object",
+      "required": ["seq", "ts", "event"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "description": "Zero-based sequence number of this snapshot within the session, incremented on every event."
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Wall-clock UTC timestamp recorded by DraftWatch at the moment the event was received (nanosecond precision ISO 8601)."
+        },
+        "event": { "$ref": "#/$defs/Event" }
+      }
+    },
+
+    "Event": {
+      "description": "Full champ-select session state as returned by the League client API at a single point in time. All fields reflect the state at the moment of the snapshot, not just what changed.",
+      "type": "object",
+      "properties": {
+        "gameId": {
+          "type": "integer",
+          "description": "Numeric game ID assigned by the server. 0 while the lobby is still forming."
+        },
+        "queueId": {
+          "type": "integer",
+          "description": "Queue type identifier. Common values: 420=Ranked Solo/Duo, 440=Ranked Flex, 400=Normal Draft, 430=Normal Blind, 450=ARAM, 900=ARURF, 1020=One for All, 1700=Arena."
+        },
+        "id": {
+          "type": "string",
+          "description": "Internal lobby/session identifier string assigned by the client."
+        },
+        "counter": {
+          "type": "integer",
+          "description": "Monotonically increasing counter incremented by the client on each state change within the session."
+        },
+        "localPlayerCellId": {
+          "type": "integer",
+          "description": "cellId of the player running DraftWatch. Used to determine which team is 'yours' and to highlight your own actions."
+        },
+        "lockedEventIndex": {
+          "type": "integer",
+          "description": "Index into the actions array of the most recently locked action. -1 when nothing is locked yet."
+        },
+        "isCustomGame": {
+          "type": "boolean",
+          "description": "True for custom lobbies."
+        },
+        "isLegacyChampSelect": {
+          "type": "boolean",
+          "description": "True when using the older blind-pick style champion select flow."
+        },
+        "isSpectating": {
+          "type": "boolean",
+          "description": "True when the local player is observing rather than participating."
+        },
+        "benchEnabled": {
+          "type": "boolean",
+          "description": "True in ARAM — champions are drawn from a shared bench and can be swapped before the game starts."
+        },
+        "rerollsRemaining": {
+          "type": "integer",
+          "description": "Number of ARAM rerolls the local player has remaining. Only meaningful when benchEnabled is true."
+        },
+        "boostableSkinCount": {
+          "type": "integer",
+          "description": "Number of skins the local player can unlock via a boost for this session."
+        },
+        "hasSimultaneousBans": {
+          "type": "boolean",
+          "description": "True when all bans on a side are submitted simultaneously rather than sequentially."
+        },
+        "hasSimultaneousPicks": {
+          "type": "boolean",
+          "description": "True when picks within the same pick slot are revealed simultaneously."
+        },
+        "skipChampionSelect": {
+          "type": "boolean",
+          "description": "True when champion select is bypassed (e.g. Tournament Draft with pre-selected champs)."
+        },
+        "showQuitButton": {
+          "type": "boolean",
+          "description": "Whether the client is currently showing the 'Quit' button to the local player."
+        },
+        "allowBattleBoost": { "type": "boolean" },
+        "allowDuplicatePicks": { "type": "boolean" },
+        "allowLockedEvents": { "type": "boolean" },
+        "allowPlayerPickSameChampion": { "type": "boolean" },
+        "allowRerolling": { "type": "boolean" },
+        "allowSkinSelection": { "type": "boolean" },
+        "allowSubsetChampionPicks": { "type": "boolean" },
+        "disallowBanningTeammateHoveredChampions": { "type": "boolean" },
+
+        "timer": { "$ref": "#/$defs/Timer" },
+        "bans": { "$ref": "#/$defs/Bans" },
+        "chatDetails": { "$ref": "#/$defs/ChatDetails" },
+
+        "myTeam": {
+          "type": "array",
+          "description": "Players on the local player's team (blue side = cellIds 0-4, red side = cellIds 5-9). Each element is a Player snapshot.",
+          "items": { "$ref": "#/$defs/Player" }
+        },
+        "theirTeam": {
+          "type": "array",
+          "description": "Players on the opposing team. Identity fields (puuid, gameName, etc.) are intentionally hidden by the client and will be empty strings or zeroes.",
+          "items": { "$ref": "#/$defs/Player" }
+        },
+        "actions": {
+          "type": "array",
+          "description": "Ordered list of action groups. Each group is an array of Action objects that happen concurrently (e.g. simultaneous bans). Groups are ordered by pick turn. Iterate groups in order and actions within each group to reconstruct the draft sequence.",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Action" }
+          }
+        },
+        "benchChampions": {
+          "type": "array",
+          "description": "Champions currently available on the ARAM bench. Empty array in non-ARAM queues.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "championId": { "type": "integer", "description": "Numeric champion ID." },
+              "isPriority": { "type": "boolean", "description": "True if the local player has marked this champion as a priority pick." }
+            }
+          }
+        },
+        "trades": {
+          "type": "array",
+          "description": "Champion trade slots — one per allied player. A trade lets two players swap their locked champions after picking. Only meaningful once both sides have locked picks.",
+          "items": { "$ref": "#/$defs/Trade" }
+        },
+        "pickOrderSwaps": {
+          "type": "array",
+          "description": "Pick-order swap slots — one per allied player. A pick-order swap lets two players exchange their turn order (i.e. who picks when), reflected as a change in assignedPosition within myTeam.",
+          "items": { "$ref": "#/$defs/Swap" }
+        },
+        "positionSwaps": {
+          "type": "array",
+          "description": "Position/role swap slots — one per allied player. A position swap lets two players exchange their assigned roles without changing pick order.",
+          "items": { "$ref": "#/$defs/Swap" }
+        }
+      }
+    },
+
+    "Timer": {
+      "description": "Countdown information for the current phase.",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "type": "string",
+          "description": "Current phase of champion select. PLANNING = initial intent phase before bans. BAN_PICK = bans and picks are in progress. FINALIZATION = all picks locked, short window before game loads. GAME_STARTING = session complete, transitioning to the game.",
+          "enum": ["PLANNING", "BAN_PICK", "FINALIZATION", "GAME_STARTING"]
+        },
+        "adjustedTimeLeftInPhase": {
+          "type": "integer",
+          "description": "Milliseconds remaining in the current phase, adjusted for network latency."
+        },
+        "totalTimeInPhase": {
+          "type": "integer",
+          "description": "Total duration of the current phase in milliseconds."
+        },
+        "internalNowInEpochMs": {
+          "type": "integer",
+          "description": "Client's current epoch time in milliseconds at the moment this snapshot was taken."
+        },
+        "isInfinite": {
+          "type": "boolean",
+          "description": "True in custom games where the timer is disabled and players can take unlimited time."
+        }
+      }
+    },
+
+    "Bans": {
+      "description": "Summary of banned champions. Populated after the ban phase completes.",
+      "type": "object",
+      "properties": {
+        "myTeamBans": {
+          "type": "array",
+          "description": "Champion IDs banned by the local player's team, in ban order.",
+          "items": { "type": "integer" }
+        },
+        "theirTeamBans": {
+          "type": "array",
+          "description": "Champion IDs banned by the opposing team, in ban order.",
+          "items": { "type": "integer" }
+        },
+        "numBans": {
+          "type": "integer",
+          "description": "Number of bans allocated per team for this queue."
+        }
+      }
+    },
+
+    "ChatDetails": {
+      "description": "Credentials for the in-client champ-select chat room. Contains short-lived JWTs issued by Riot's servers. These are recorded verbatim and expire within minutes of issuance.",
+      "type": "object",
+      "properties": {
+        "multiUserChatId": {
+          "type": "string",
+          "description": "UUID identifying the MUC (multi-user chat) room for this session."
+        },
+        "multiUserChatPassword": {
+          "type": "string",
+          "description": "JWT used as the password to join the MUC room."
+        },
+        "mucJwtDto": {
+          "type": "object",
+          "description": "Structured form of the MUC JWT.",
+          "properties": {
+            "channelClaim": { "type": "string", "description": "Channel UUID embedded in the JWT claim." },
+            "domain": { "type": "string", "description": "Service domain, typically 'lol-champ-select'." },
+            "jwt": { "type": "string", "description": "Raw JWT string." },
+            "targetRegion": { "type": "string", "description": "Riot region code, e.g. 'na1'." }
+          }
+        }
+      }
+    },
+
+    "Player": {
+      "description": "Snapshot of a single player's state within the session. Fields for opponents (theirTeam) are intentionally blanked by the client to hide identity.",
+      "type": "object",
+      "properties": {
+        "cellId": {
+          "type": "integer",
+          "description": "Stable slot identifier for this player within the session (0-4 = blue team, 5-9 = red team). Used to correlate players across snapshots and to match actions to players."
+        },
+        "team": {
+          "type": "integer",
+          "description": "Team number: 1 = blue side, 2 = red side."
+        },
+        "teamId": {
+          "type": "integer",
+          "description": "Riot's team ID: 100 = blue side, 200 = red side."
+        },
+        "assignedPosition": {
+          "type": "string",
+          "description": "Role this player is currently assigned to pick for. Values: 'top', 'jungle', 'middle', 'bottom', 'utility'. Empty string for blind pick or when unassigned. Changes when a pick-order or position swap is accepted.",
+          "enum": ["top", "jungle", "middle", "bottom", "utility", ""]
+        },
+        "championId": {
+          "type": "integer",
+          "description": "ID of the champion the player has currently locked in. 0 until locked."
+        },
+        "championPickIntent": {
+          "type": "integer",
+          "description": "ID of the champion the player is hovering but has not yet locked. 0 when not hovering."
+        },
+        "selectedSkinId": {
+          "type": "integer",
+          "description": "Skin ID the player has selected for their champion."
+        },
+        "spell1Id": {
+          "type": "integer",
+          "description": "Summoner spell 1 ID. 0 for opponents (hidden)."
+        },
+        "spell2Id": {
+          "type": "integer",
+          "description": "Summoner spell 2 ID. 0 for opponents (hidden)."
+        },
+        "wardSkinId": {
+          "type": "integer",
+          "description": "Ward skin ID. -1 when none selected."
+        },
+        "summonerId": {
+          "type": "integer",
+          "description": "Legacy summoner ID. 0 for opponents and in newer client versions where puuid is preferred."
+        },
+        "obfuscatedSummonerId": {
+          "type": "integer",
+          "description": "Obfuscated summoner ID visible to allies. Non-zero for teammates, 0 for opponents."
+        },
+        "puuid": {
+          "type": "string",
+          "description": "Player UUID (Riot account identifier). Empty string for opponents (hidden by client)."
+        },
+        "obfuscatedPuuid": {
+          "type": "string",
+          "description": "Obfuscated PUUID visible to allies. Non-empty for teammates, empty for opponents."
+        },
+        "gameName": {
+          "type": "string",
+          "description": "Riot ID game name (the part before #). Empty for opponents. Prefer this over summonerName for display."
+        },
+        "tagLine": {
+          "type": "string",
+          "description": "Riot ID tag line (the part after #). Empty for opponents."
+        },
+        "playerAlias": { "type": "string" },
+        "internalName": { "type": "string" },
+        "nameVisibilityType": {
+          "type": "string",
+          "description": "Whether the player's identity is visible to opponents. 'HIDDEN' = identity concealed, 'VISIBLE' = identity shown.",
+          "enum": ["HIDDEN", "VISIBLE"]
+        },
+        "playerType": { "type": "string" },
+        "isAutofilled": {
+          "type": "boolean",
+          "description": "True if the player was placed into this role by autofill rather than their queued preference."
+        },
+        "isHumanoid": { "type": "boolean" },
+        "pickMode": { "type": "integer" },
+        "pickTurn": { "type": "integer" }
+      }
+    },
+
+    "Action": {
+      "description": "A single ban, pick, or reveal event within the draft. Actions are grouped and ordered; completed=true means the action has been submitted.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Unique action ID within the session. Used to order actions globally and to correlate swap timing. Note: ten_bans_reveal uses a high ID (e.g. 104) that does not reflect chronological order relative to picks."
+        },
+        "type": {
+          "type": "string",
+          "description": "Action type: 'ban' = a ban slot, 'pick' = a pick slot, 'ten_bans_reveal' = the animation reveal after all bans are submitted (not a player action).",
+          "enum": ["ban", "pick", "ten_bans_reveal"]
+        },
+        "actorCellId": {
+          "type": "integer",
+          "description": "cellId of the player who owns this action. -1 for ten_bans_reveal (no player actor)."
+        },
+        "championId": {
+          "type": "integer",
+          "description": "Champion ID selected for this action. 0 until the player submits."
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "True once the player has locked in their choice and the action is finalised."
+        },
+        "isInProgress": {
+          "type": "boolean",
+          "description": "True while this action is the currently active slot (the timer is counting down for it)."
+        },
+        "isAllyAction": {
+          "type": "boolean",
+          "description": "True when this action belongs to the local player's team."
+        },
+        "pickTurn": {
+          "type": "integer",
+          "description": "Draft turn number for this action (used by the client for ordering within simultaneous pick groups)."
+        },
+        "duration": {
+          "type": "integer",
+          "description": "Duration override in milliseconds. 0 means use the phase default timer."
+        }
+      }
+    },
+
+    "Trade": {
+      "description": "A champion trade slot. One slot exists per allied player. A trade lets two players swap their already-locked champions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Unique trade slot ID within the session."
+        },
+        "cellId": {
+          "type": "integer",
+          "description": "cellId of the allied player this trade slot belongs to."
+        },
+        "state": {
+          "type": "string",
+          "description": "Current state of this trade slot. INVALID = trade not possible (player has not locked a pick yet, or already traded). AVAILABLE = this player can be sent a trade request. REQUESTED = local player has sent a trade request to this player. RECEIVED = this player has sent a trade request to the local player. ACCEPTED = trade accepted and in progress. CANCELLED = trade was declined or timed out.",
+          "enum": ["INVALID", "AVAILABLE", "REQUESTED", "RECEIVED", "ACCEPTED", "CANCELLED"]
+        }
+      }
+    },
+
+    "Swap": {
+      "description": "A pick-order or position swap slot. One slot exists per allied player. Pick-order swaps exchange when two players pick; position swaps exchange their assigned roles. Both types change assignedPosition in myTeam when completed.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Unique swap slot ID within the session. IDs are reassigned as swaps complete and new slots open."
+        },
+        "cellId": {
+          "type": "integer",
+          "description": "cellId of the allied player this swap slot belongs to."
+        },
+        "state": {
+          "type": "string",
+          "description": "Current state of this swap slot. AVAILABLE = a swap can be initiated with this player. BUSY = a swap involving this slot is currently in progress (being accepted). INVALID = swap not currently possible.",
+          "enum": ["AVAILABLE", "BUSY", "INVALID"]
+        },
+        "initiatorCellId": {
+          "type": ["integer", "null"],
+          "description": "cellId of the player who initiated the swap request. Not consistently populated by the client in observed data."
+        },
+        "receiverCellId": {
+          "type": ["integer", "null"],
+          "description": "cellId of the player who received the swap request. Not consistently populated by the client in observed data."
+        }
+      }
+    }
+
+  },
+
+  "type": "array",
+  "description": "The JSONL file is read as one Record object per line.",
+  "items": { "$ref": "#/$defs/Record" }
+}
