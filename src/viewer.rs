@@ -324,12 +324,12 @@ enum SwapKind {
 }
 
 struct SwapEvent {
-    cell_id: u32,
     from_pos: String,
     to_pos: String,
     after_action_id: Option<u32>, // None = before any ban/pick; Some(id) = after that action
     pick_number: Option<u8>,      // overall draft pick slot (1st, 2nd, … 10th)
     kind: SwapKind,
+    player_name: String, // name of the player at this cellId when the swap was detected
 }
 
 struct Action {
@@ -412,6 +412,10 @@ fn render_session(filename: &str) -> String {
     let mut pos_state: HashMap<u32, String> = HashMap::new();
     let mut swap_events: Vec<SwapEvent> = Vec::new();
     let mut last_busy_kind: Option<SwapKind> = None;
+    // Maps action id → (player_name, position) captured the first time the action appears completed.
+    // The LCU doesn't update actorCellId retroactively after pick-order swaps, so we must record
+    // who occupied each cellId at the moment each action first became completed.
+    let mut completed_action_actors: HashMap<u32, (String, String)> = HashMap::new();
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -437,6 +441,22 @@ fn render_session(filename: &str) -> String {
                     last_busy_kind = Some(SwapKind::Position);
                 }
 
+                // Build cellId → (name, assignedPosition) for this snapshot.
+                let cell_info: HashMap<u32, (String, String)> = [&ev["myTeam"], &ev["theirTeam"]]
+                    .iter()
+                    .filter_map(|t| t.as_array())
+                    .flatten()
+                    .filter_map(|p| {
+                        let cid = p["cellId"].as_u64()? as u32;
+                        let name = p["gameName"].as_str().filter(|s| !s.is_empty())
+                            .or_else(|| p["displayName"].as_str().filter(|s| !s.is_empty()))
+                            .or_else(|| p["summonerName"].as_str().filter(|s| !s.is_empty()))
+                            .unwrap_or("").to_string();
+                        let pos = p["assignedPosition"].as_str().unwrap_or("").to_string();
+                        Some((cid, (name, pos)))
+                    })
+                    .collect();
+
                 let new_positions = event_positions(&ev);
                 let new_pick_nums = event_pick_numbers(&ev);
                 let after = highest_completed_action(&ev);
@@ -446,13 +466,16 @@ fn render_session(filename: &str) -> String {
                 for (cell_id, new_pos) in &new_positions {
                     if let Some(old_pos) = pos_state.get(cell_id) {
                         if old_pos != new_pos {
+                            let pname = cell_info.get(cell_id)
+                                .map(|(n, _)| n.clone())
+                                .unwrap_or_default();
                             swap_events.push(SwapEvent {
-                                cell_id: *cell_id,
                                 from_pos: old_pos.clone(),
                                 to_pos: new_pos.clone(),
                                 after_action_id: after,
                                 pick_number: new_pick_nums.get(cell_id).copied(),
                                 kind: last_busy_kind.unwrap_or(SwapKind::PickOrder),
+                                player_name: pname,
                             });
                         }
                     }
@@ -461,18 +484,35 @@ fn render_session(filename: &str) -> String {
                     last_busy_kind = None;
                 }
                 pos_state = new_positions;
+
+                // Record which player was at each actorCellId the first time each action
+                // appears completed. Later snapshots may have different players at the same
+                // cellId after a pick-order swap, so .entry().or_insert() keeps the earliest.
+                for group in ev["actions"].as_array().into_iter().flatten() {
+                    if let Some(acts) = group.as_array() {
+                        for a in acts {
+                            if !a["completed"].as_bool().unwrap_or(false) { continue; }
+                            let Some(action_id) = a["id"].as_u64().map(|id| id as u32) else { continue };
+                            let Some(actor_cell_id) = a["actorCellId"].as_u64().map(|id| id as u32) else { continue };
+                            completed_action_actors.entry(action_id).or_insert_with(|| {
+                                cell_info.get(&actor_cell_id).cloned().unwrap_or_default()
+                            });
+                        }
+                    }
+                }
+
                 last_event = Some(ev);
             }
         }
     }
 
     match last_event {
-        Some(ev) => render_draft(filename, first_ts.as_deref(), &ev, &swap_events),
+        Some(ev) => render_draft(filename, first_ts.as_deref(), &ev, &swap_events, &completed_action_actors),
         None => error_page("No valid events found in session."),
     }
 }
 
-fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_events: &[SwapEvent]) -> String {
+fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_events: &[SwapEvent], completed_action_actors: &HashMap<u32, (String, String)>) -> String {
     let game_id = event["gameId"].as_i64().filter(|&id| id != 0);
     let phase = event["timer"]["phase"].as_str().unwrap_or("");
     let is_complete = matches!(phase, "GAME_STARTING" | "FINALIZATION");
@@ -519,6 +559,21 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_even
         .and_then(|&i| players.get(i))
         .map(|p| p.team_id)
         .unwrap_or(100);
+
+    // Local player's name — stable across snapshots and used to detect YOU in the timeline
+    // after pick-order swaps have shifted which cellId the local player occupies.
+    let local_name: String = cell_idx
+        .get(&local_cell)
+        .and_then(|&i| players.get(i))
+        .map(|p| p.display_name.clone())
+        .unwrap_or_default();
+
+    // name → Player reference for champion lookup in swap rows.
+    let name_to_player: HashMap<&str, &Player> = players
+        .iter()
+        .filter(|p| !p.display_name.is_empty())
+        .map(|p| (p.display_name.as_str(), p))
+        .collect();
 
     // Split and sort by position
     let mut blue: Vec<&Player> = players.iter().filter(|p| p.team_id == 100).collect();
@@ -600,7 +655,7 @@ fn render_draft(filename: &str, first_ts: Option<&str>, event: &Value, swap_even
     let blue_html = render_roster(&blue, local_cell);
     let red_html = render_roster(&red, local_cell);
     let bench_html = render_bench(event);
-    let timeline_html = render_timeline(&actions, &players, &cell_idx, local_cell, &trade_pairs, swap_events);
+    let timeline_html = render_timeline(&actions, &players, &cell_idx, local_cell, &local_name, &name_to_player, &trade_pairs, swap_events, completed_action_actors);
 
     let abort_notice = if !is_complete {
         let reason = match phase {
@@ -712,8 +767,10 @@ fn render_roster(players: &[&Player], local_cell: u32) -> String {
 }
 
 
-fn swap_side(s: &SwapEvent, p: Option<&&Player>) -> String {
-    let champ_id = p.map(|pl| pl.champion_id).unwrap_or(0);
+fn swap_side(s: &SwapEvent, name_to_player: &HashMap<&str, &Player>) -> String {
+    let champ_id = name_to_player.get(s.player_name.as_str())
+        .map(|p| p.champion_id)
+        .unwrap_or(0);
     let champ = if champ_id > 0 { champ_name(champ_id) } else { "" };
     let img = champ_img_url(champ_id)
         .map(|url| format!(r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(champ)))
@@ -721,41 +778,40 @@ fn swap_side(s: &SwapEvent, p: Option<&&Player>) -> String {
     let pick = s.pick_number
         .map(|n| ordinal(n))
         .unwrap_or_else(|| "—".into());
-    let name = p.filter(|pl| !pl.display_name.is_empty())
-        .map(|pl| format!(r#"<span class="actor">{}</span>"#, esc(&pl.display_name)))
-        .unwrap_or_default();
+    let name = if !s.player_name.is_empty() {
+        format!(r#"<span class="actor">{}</span>"#, esc(&s.player_name))
+    } else {
+        String::new()
+    };
     let label = format!(
         r#"<span class="trade-label"><span class="champ">{pick}</span>{name}</span>"#,
     );
     format!("{img}{label}")
 }
 
-fn render_swap_row(s: &SwapEvent, cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
-    let p = cell_to_player.get(&s.cell_id);
-    let you = if p.map(|pl| pl.cell_id) == Some(local_cell) {
+fn render_swap_row(s: &SwapEvent, name_to_player: &HashMap<&str, &Player>, local_name: &str) -> String {
+    let you = if !local_name.is_empty() && s.player_name == local_name {
         r#"<span class="you">YOU</span>"#
     } else {
         r#"<span class="you" style="visibility:hidden">YOU</span>"#
     };
-    let side = swap_side(s, p);
+    let side = swap_side(s, name_to_player);
     let (cls, dot_cls, sub) = swap_kind_attrs(s.kind);
     format!(
         r#"<li class="action {cls}"><span class="n"></span><span class="dot {dot_cls}"></span><span class="tb">SWAP</span><span class="swap-sub">{sub}</span><div class="trade-inline">{side}</div>{you}</li>"#,
     )
 }
 
-fn render_swap_pair_row(s1: &SwapEvent, s2: &SwapEvent, cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
-    let pa = cell_to_player.get(&s1.cell_id);
-    let pb = cell_to_player.get(&s2.cell_id);
-    let involved = pa.map(|p| p.cell_id) == Some(local_cell)
-        || pb.map(|p| p.cell_id) == Some(local_cell);
+fn render_swap_pair_row(s1: &SwapEvent, s2: &SwapEvent, name_to_player: &HashMap<&str, &Player>, local_name: &str) -> String {
+    let involved = !local_name.is_empty()
+        && (s1.player_name == local_name || s2.player_name == local_name);
     let you = if involved {
         r#"<span class="you">YOU</span>"#
     } else {
         r#"<span class="you" style="visibility:hidden">YOU</span>"#
     };
-    let side_a = swap_side(s1, pa);
-    let side_b = swap_side(s2, pb);
+    let side_a = swap_side(s1, name_to_player);
+    let side_b = swap_side(s2, name_to_player);
     let (cls, dot_cls, sub) = swap_kind_attrs(s1.kind);
     format!(
         r#"<li class="action {cls}"><span class="n"></span><span class="dot {dot_cls}"></span><span class="tb">SWAP</span><span class="swap-sub">{sub}</span><div class="trade-inline">{side_a}<span class="trade-inline-arrow">&#8596;</span>{side_b}</div>{you}</li>"#,
@@ -770,7 +826,7 @@ fn swap_kind_attrs(kind: SwapKind) -> (&'static str, &'static str, &'static str)
     }
 }
 
-fn render_swap_group(swaps: &[&SwapEvent], cell_to_player: &HashMap<u32, &Player>, local_cell: u32) -> String {
+fn render_swap_group(swaps: &[&SwapEvent], name_to_player: &HashMap<&str, &Player>, local_name: &str) -> String {
     let mut used = vec![false; swaps.len()];
     let mut html = String::new();
     for i in 0..swaps.len() {
@@ -784,10 +840,10 @@ fn render_swap_group(swaps: &[&SwapEvent], cell_to_player: &HashMap<u32, &Player
         if let Some(j) = partner {
             used[i] = true;
             used[j] = true;
-            html.push_str(&render_swap_pair_row(swaps[i], swaps[j], cell_to_player, local_cell));
+            html.push_str(&render_swap_pair_row(swaps[i], swaps[j], name_to_player, local_name));
         } else {
             used[i] = true;
-            html.push_str(&render_swap_row(swaps[i], cell_to_player, local_cell));
+            html.push_str(&render_swap_row(swaps[i], name_to_player, local_name));
         }
     }
     html
@@ -798,8 +854,11 @@ fn render_timeline(
     players: &[Player],
     cell_idx: &HashMap<u32, usize>,
     local_cell: u32,
+    local_name: &str,
+    name_to_player: &HashMap<&str, &Player>,
     trade_pairs: &[(u32, u32, u32, u32)],
     swap_events: &[SwapEvent],
+    completed_action_actors: &HashMap<u32, (String, String)>,
 ) -> String {
     let mut html = String::new();
     let cell_to_player: HashMap<u32, &Player> = players.iter().map(|p| (p.cell_id, p)).collect();
@@ -826,7 +885,7 @@ fn render_timeline(
     }
     if !pre_swaps.is_empty() {
         html.push_str(r#"<li class="phase-div">Swaps</li>"#);
-        html.push_str(&render_swap_group(&pre_swaps, &cell_to_player, local_cell));
+        html.push_str(&render_swap_group(&pre_swaps, name_to_player, local_name));
     }
 
     // Build map: action_id → trades to insert after it.
@@ -865,8 +924,19 @@ fn render_timeline(
         }
 
         let n = i + 1;
-        let player = cell_idx.get(&a.actor_cell_id).and_then(|&i| players.get(i));
-        let team_cls = player
+        // Use the name/position captured when this action first appeared completed.
+        // Falling back to the final-event cell mapping handles actions not yet seen
+        // (shouldn't happen in practice since we scan all snapshots).
+        let (actor_name, actor_pos): (&str, &str) = completed_action_actors
+            .get(&a.id)
+            .map(|(n, p)| (n.as_str(), p.as_str()))
+            .unwrap_or_else(|| {
+                cell_idx.get(&a.actor_cell_id)
+                    .and_then(|&i| players.get(i))
+                    .map(|p| (p.display_name.as_str(), p.position.as_str()))
+                    .unwrap_or(("", ""))
+            });
+        let team_cls = name_to_player.get(actor_name)
             .map(|p| if p.team_id == 100 { "blue" } else { "red" })
             .unwrap_or(if a.actor_cell_id < 5 { "blue" } else { "red" });
         let type_cls = if a.kind == "ban" { "ban" } else { "pick" };
@@ -875,18 +945,18 @@ fn render_timeline(
         let img_html = champ_img_url(a.champion_id)
             .map(|url| format!(r#"<img class="tl-portrait" src="{url}" alt="{}" loading="lazy">"#, esc(champ)))
             .unwrap_or_default();
-        let actor_html = player
-            .map(|p| {
-                let pos = pos_abbr(&p.position);
-                let name_part = if !p.display_name.is_empty() {
-                    format!(" · {}", esc(&p.display_name))
-                } else {
-                    String::new()
-                };
-                format!(r#"<span class="actor">{pos}{name_part}</span>"#)
-            })
-            .unwrap_or_default();
-        let you = if a.actor_cell_id == local_cell {
+        let actor_html = if !actor_pos.is_empty() || !actor_name.is_empty() {
+            let pos = pos_abbr(actor_pos);
+            let name_part = if !actor_name.is_empty() {
+                format!(" · {}", esc(actor_name))
+            } else {
+                String::new()
+            };
+            format!(r#"<span class="actor">{pos}{name_part}</span>"#)
+        } else {
+            String::new()
+        };
+        let you = if !local_name.is_empty() && actor_name == local_name {
             r#"<span class="you">YOU</span>"#
         } else {
             r#"<span class="you" style="visibility:hidden">YOU</span>"#
@@ -938,7 +1008,7 @@ fn render_timeline(
 
         // Insert any pick swaps that happened after this action.
         if let Some(swaps) = swaps_after.get(&a.id) {
-            html.push_str(&render_swap_group(swaps, &cell_to_player, local_cell));
+            html.push_str(&render_swap_group(swaps, name_to_player, local_name));
         }
     }
 
@@ -1045,7 +1115,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .action.blue .dot{background:#4a9fd4}
 .action.red .dot{background:#d44a4a}
 .action .tb{width:30px;font-size:.65em;font-weight:700;text-transform:uppercase;color:#555;flex-shrink:0}
-.action .champ{min-width:130px;font-weight:600}
+.action .champ{font-weight:600}
 .action .actor{font-size:.8em;color:#555;flex:1}
 .action.ban{background:rgba(255,255,255,.02)}
 .action.ban .champ{color:#444;text-decoration:line-through}
